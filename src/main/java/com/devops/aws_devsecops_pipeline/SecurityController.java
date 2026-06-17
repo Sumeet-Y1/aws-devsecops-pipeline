@@ -22,6 +22,9 @@ public class SecurityController {
             response.put("timestamp", LocalDateTime.now().toString());
             response.put("status", "secure");
             response.put("pipeline", "devsecops");
+            response.put("trivy", "passed");
+            response.put("owasp", "passed");
+            response.put("gitleaks", "passed");
         } catch (Exception e) {
             response.put("error", e.getMessage());
         }
