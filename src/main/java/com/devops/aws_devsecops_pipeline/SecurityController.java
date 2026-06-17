@@ -21,6 +21,7 @@ public class SecurityController {
             response.put("server", InetAddress.getLocalHost().getHostName());
             response.put("timestamp", LocalDateTime.now().toString());
             response.put("status", "secure");
+            response.put("pipeline", "devsecops");
         } catch (Exception e) {
             response.put("error", e.getMessage());
         }

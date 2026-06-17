@@ -1,0 +1,107 @@
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'Dockerfile'
+      - 'pom.xml'
+  workflow_dispatch:
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    name: Security Checks
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v3
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Build with Maven
+        run: mvn clean package -DskipTests
+
+      #  STEP 1 - Secrets Detection
+      - name: GitLeaks - Scan for hardcoded secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      #  STEP 2 - Dependency Vulnerability Scan
+      - name: OWASP Dependency Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: 'aws-devsecops-pipeline'
+          path: '.'
+          format: 'HTML'
+          args: >
+            --failOnCVSS 8
+            --enableRetired
+        env:
+          JAVA_HOME: /opt/jdk
+
+      - name: Upload OWASP Report
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: owasp-report
+          path: reports/
+
+      #  STEP 3 - Container Image Scan
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: aws-devsecops-pipeline
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }} .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }} $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Trivy - Scan Docker image for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '479679056963.dkr.ecr.ap-south-1.amazonaws.com/aws-devsecops-pipeline:latest'
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL'
+          ignore-unfixed: true
+
+      # STEP 4 - Deploy if all checks pass
+      - name: Push Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: aws-devsecops-pipeline
+        run: |
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}
+
+      - name: Deploy to EC2 via SSM
+        run: |
+          aws ssm send-command \
+            --instance-ids ${{ secrets.INSTANCE_ID }} \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands=["
+              aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin 479679056963.dkr.ecr.ap-south-1.amazonaws.com,
+              docker pull 479679056963.dkr.ecr.ap-south-1.amazonaws.com/aws-devsecops-pipeline:latest,
+              docker stop \$(docker ps -q) || true,
+              docker rm \$(docker ps -aq) || true,
+              docker run -d -p 8080:8080 --restart always 479679056963.dkr.ecr.ap-south-1.amazonaws.com/aws-devsecops-pipeline:latest
+            "] \
+            --region ap-south-1
+          echo " Deployed successfully!"
